@@ -1,0 +1,180 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <Adafruit_SSD1327.h>
+#include <ESP32Servo.h>
+
+// --- OLED SPI Pins ---
+#define OLED_SCK   4
+#define OLED_MOSI  1
+#define OLED_CS    10
+#define OLED_DC    8
+#define OLED_RST   9
+
+// --- Servo Pins ---
+#define SERVO1_PIN  0
+#define SERVO2_PIN  2
+#define SERVO3_PIN  3
+#define SERVO4_PIN  5
+#define SERVO5_PIN  6
+#define SERVO6_PIN  7
+
+// --- WiFi AP ---
+const char* AP_SSID = "OLED_Dashboard";
+const char* AP_PASS = "12345678";
+
+// --- Objects ---
+Adafruit_SSD1327 display(128, 128, &SPI, OLED_DC, OLED_RST, OLED_CS);
+WebServer server(80);
+Servo servo[6];
+int servoAngles[6] = {90, 90, 90, 90, 90, 90};
+String oledText = "";
+
+// --- Web Page ---
+const char* index_html = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Servo + OLED Dashboard</title>
+  <style>
+    body{font-family:sans-serif;text-align:center;background:#1a1a2e;color:#fff;padding:20px}
+    .card{background:#16213e;border-radius:12px;padding:20px;max-width:450px;margin:auto;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+    h1{font-size:1.3em;margin-bottom:15px}
+    .servo-row{display:flex;align-items:center;margin:8px 0;gap:10px}
+    .servo-row label{width:60px;font-size:14px;text-align:right}
+    .servo-row input[type=range]{flex:1}
+    .servo-row span{width:40px;font-size:13px;color:#aaa}
+    input[type=text]{width:100%;padding:10px;font-size:15px;border:none;border-radius:6px;box-sizing:border-box;margin-top:10px}
+    button{margin-top:10px;width:100%;padding:10px;font-size:15px;background:#0f3460;color:#fff;border:none;border-radius:6px;cursor:pointer}
+    button:active{background:#e94560}
+    .status{margin-top:12px;font-size:12px;color:#aaa}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Servo Control + OLED</h1>
+    <form method="POST" action="/">
+      <div class="servo-row"><label>Servo 1</label><input type="range" name="s1" id="s1" min="0" max="180" value="90"><span id="v1">90</span></div>
+      <div class="servo-row"><label>Servo 2</label><input type="range" name="s2" id="s2" min="0" max="180" value="90"><span id="v2">90</span></div>
+      <div class="servo-row"><label>Servo 3</label><input type="range" name="s3" id="s3" min="0" max="180" value="90"><span id="v3">90</span></div>
+      <div class="servo-row"><label>Servo 4</label><input type="range" name="s4" id="s4" min="0" max="180" value="90"><span id="v4">90</span></div>
+      <div class="servo-row"><label>Servo 5</label><input type="range" name="s5" id="s5" min="0" max="180" value="90"><span id="v5">90</span></div>
+      <div class="servo-row"><label>Servo 6</label><input type="range" name="s6" id="s6" min="0" max="180" value="90"><span id="v6">90</span></div>
+      <input type="text" name="text" placeholder="OLED text..." maxlength="30">
+      <button type="submit">Apply</button>
+    </form>
+    <div class="status">IP: <span id="ip"></span></div>
+  </div>
+  <script>
+    document.getElementById('ip').textContent=location.hostname;
+    for(let i=1;i<=6;i++){
+      document.getElementById('s'+i).addEventListener('input',function(){
+        document.getElementById('v'+i).textContent=this.value;
+      });
+    }
+  </script>
+</body>
+</html>
+)rawliteral";
+
+// --- OLED word-wrap ---
+void showOnOLED(const String& text) {
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1327_WHITE);
+
+  int x = 0, y = 0;
+  const int LINE_H = 12;
+  const int CHAR_W = 6;
+
+  String word = "";
+  for (int i = 0; i <= text.length(); i++) {
+    char c = (i < text.length()) ? text[i] : '\n';
+    if (c == ' ' || c == '\n') {
+      if (word.length() > 0) {
+        int w = word.length() * CHAR_W;
+        if (x + w > 128) { x = 0; y += LINE_H; }
+        if (y < 128) {
+          display.setCursor(x, y);
+          display.print(word);
+          x += w;
+        }
+        word = "";
+      }
+      if (c == '\n') { x = 0; y += LINE_H; }
+    } else {
+      word += c;
+    }
+  }
+  display.display();
+}
+
+// --- Web handlers ---
+void handleRoot() {
+  server.send(200, "text/html", index_html);
+}
+
+void handlePost() {
+  // Read servo angles
+  for (int i = 0; i < 6; i++) {
+    String key = "s" + String(i + 1);
+    if (server.hasArg(key)) {
+      int angle = constrain(server.arg(key).toInt(), 0, 180);
+      if (angle != servoAngles[i]) {
+        servoAngles[i] = angle;
+        servo[i].write(angle);
+      }
+    }
+  }
+
+  // Read OLED text
+  if (server.hasArg("text")) {
+    oledText = server.arg("text");
+    showOnOLED(oledText);
+  }
+
+  server.send(200, "text/html", index_html);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // OLED
+  SPI.begin(OLED_SCK, -1, OLED_MOSI, OLED_CS);
+  if (!display.begin()) {
+    Serial.println("OLED init FAILED");
+    while (1) delay(100);
+  }
+  showOnOLED("Starting...");
+
+  // Servos
+  int pins[] = {SERVO1_PIN, SERVO2_PIN, SERVO3_PIN, SERVO4_PIN, SERVO5_PIN, SERVO6_PIN};
+  for (int i = 0; i < 6; i++) {
+    servo[i].setPeriodHertz(50);
+    servo[i].attach(pins[i], 500, 2400);
+    servo[i].write(servoAngles[i]);
+  }
+
+  // WiFi AP
+  WiFi.mode(WIFI_AP);
+  WiFi.setSleep(false);
+  delay(500);
+  WiFi.softAP(AP_SSID, AP_PASS, 1);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Web server
+  server.on("/", HTTP_GET, handleRoot);
+  server.on("/", HTTP_POST, handlePost);
+  server.begin();
+
+  showOnOLED("Ready! 6 Servos");
+}
+
+void loop() {
+  server.handleClient();
+}
